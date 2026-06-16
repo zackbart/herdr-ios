@@ -8,12 +8,12 @@ enum Theme {
     // Brand neutrals, pulled from the ram mark.
     static let ink = Color(hex: 0x23272B)
 
-    // Terminal surface (used in PaneView regardless of light/dark mode —
-    // terminals are dark).
-    static let terminalBG = Color(hex: 0x15181B)
-    static let terminalSurface = Color(hex: 0x21262C)
-    static let terminalText = Color(hex: 0xE7E6E2)
-    static let terminalDim = Color(hex: 0x848B93)
+    // Terminal surface (PaneView) — light mode: a clean near-white paper with
+    // dark ink, matching the rest of the app.
+    static let terminalBG = Color(hex: 0xFCFCFA)
+    static let terminalSurface = Color(hex: 0xEDECE8)
+    static let terminalText = Color(hex: 0x23272B)
+    static let terminalDim = Color(hex: 0x8A9099)
     /// The prompt accent — echoes the `>-` terminal-prompt eye in the logo.
     static let prompt = Color(hex: 0x57B89E)
 
