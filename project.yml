@@ -1,0 +1,50 @@
+# XcodeGen project definition — the maintained source of truth for the iOS app
+# target. Generate the Xcode project with:
+#
+#     brew install xcodegen
+#     xcodegen generate
+#     open Herdr.xcodeproj
+#
+# The platform-independent core lives in the local Swift package `HerdrKit`
+# (see Package.swift) and is consumed here as a local package dependency.
+name: Herdr
+options:
+  bundleIdPrefix: dev.herdr
+  createIntermediateGroups: true
+  deploymentTarget:
+    iOS: "17.0"
+
+packages:
+  HerdrKit:
+    path: .
+  # SSH transport dependency — uncomment when wiring the real socket bridge
+  # (see App/Herdr/Connection/SSHTransport.swift and the README). Left out for
+  # now so the project builds cleanly with the SSH transport stubbed.
+  # Citadel:
+  #   url: https://github.com/orlandos-nl/Citadel.git
+  #   from: "0.7.0"
+
+targets:
+  Herdr:
+    type: application
+    platform: iOS
+    sources:
+      - App/Herdr
+    dependencies:
+      - package: HerdrKit
+        product: HerdrKit
+      # - package: Citadel
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.herdr.client
+        PRODUCT_NAME: Herdr
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        SWIFT_VERSION: "5.9"
+        TARGETED_DEVICE_FAMILY: "1,2"
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_CFBundleDisplayName: Herdr
+        INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_KEY_UISupportedInterfaceOrientations: "UIInterfaceOrientationPortrait"
+        INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad: "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"
