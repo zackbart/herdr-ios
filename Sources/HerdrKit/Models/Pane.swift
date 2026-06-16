@@ -14,6 +14,10 @@ public struct Pane: Identifiable, Codable, Hashable, Sendable {
     /// Whether this pane currently holds focus within its tab.
     public var isFocused: Bool
     public var cwd: String?
+    /// True when this pane hosts a recognized agent. Stored (not `agent != nil`)
+    /// because the real API can report an agent status for a pane before its
+    /// name is known — we still want the UI to treat it as an agent pane.
+    public var isAgent: Bool
 
     public init(
         id: PaneID,
@@ -21,7 +25,8 @@ public struct Pane: Identifiable, Codable, Hashable, Sendable {
         agent: String? = nil,
         status: AgentStatus = .unknown,
         isFocused: Bool = false,
-        cwd: String? = nil
+        cwd: String? = nil,
+        isAgent: Bool? = nil
     ) {
         self.id = id
         self.title = title
@@ -29,8 +34,6 @@ public struct Pane: Identifiable, Codable, Hashable, Sendable {
         self.status = status
         self.isFocused = isFocused
         self.cwd = cwd
+        self.isAgent = isAgent ?? (agent != nil)
     }
-
-    /// True when this pane hosts a recognized agent.
-    public var isAgent: Bool { agent != nil }
 }

@@ -17,16 +17,37 @@ final class SessionModel {
     var loadError: String?
 
     private var eventTask: Task<Void, Never>?
+    private var refreshTask: Task<Void, Never>?
+    private var subscribedTopology = false
+    private var subscribedPanes: Set<PaneID> = []
 
     init(client: HerdrClient, label: String) {
         self.client = client
         self.label = label
     }
 
-    /// Load the initial workspace list and begin observing live events.
+    /// Load the initial workspace list, begin observing live events, and
+    /// subscribe to topology + per-agent-pane status changes.
     func start() async {
         await refresh()
         observeEvents()
+        await syncSubscriptions()
+    }
+
+    /// Subscribe to topology once, plus agent-status for any agent panes we
+    /// haven't subscribed to yet. Safe to call after each refresh.
+    private func syncSubscriptions() async {
+        var subscriptions: [EventSubscription] = []
+        if !subscribedTopology {
+            subscriptions.append(.topology)
+            subscribedTopology = true
+        }
+        let agentPanes = Set(workspaces.flatMap(\.panes).filter(\.isAgent).map(\.id))
+        let fresh = agentPanes.subtracting(subscribedPanes)
+        subscriptions += fresh.map { .paneAgentStatus($0) }
+        subscribedPanes.formUnion(fresh)
+        guard !subscriptions.isEmpty else { return }
+        try? await client.subscribe(subscriptions)
     }
 
     func refresh() async {
@@ -86,7 +107,19 @@ final class SessionModel {
         case .output(let pane, let chunk):
             appendOutput(chunk, to: pane)
         case .topologyChanged:
-            Task { await refresh() }
+            scheduleRefresh()
+        }
+    }
+
+    /// Coalesce bursty topology events (a workspace close emits tab + pane
+    /// closes too) into a single debounced re-list + re-subscribe.
+    private func scheduleRefresh() {
+        refreshTask?.cancel()
+        refreshTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(300))
+            guard !Task.isCancelled else { return }
+            await self?.refresh()
+            await self?.syncSubscriptions()
         }
     }
 

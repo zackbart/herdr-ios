@@ -13,9 +13,8 @@ import Foundation
 public actor HerdrClient {
     private let transport: HerdrTransport
 
-    private var pending: [String: CheckedContinuation<RPCResponse, Error>] = [:]
     private var nextID = 0
-    private var consumeTask: Task<Void, Never>?
+    private var subscriptionTasks: [Task<Void, Never>] = []
 
     private let events: AsyncStream<HerdrEvent>
     private let eventsContinuation: AsyncStream<HerdrEvent>.Continuation
@@ -35,22 +34,14 @@ public actor HerdrClient {
 
     public func connect() async throws {
         try await transport.connect()
-        let incoming = transport.messages()
-        consumeTask = Task { [weak self] in
-            for await message in incoming {
-                await self?.handle(message)
-            }
-            await self?.failAllPending(HerdrError.transportClosed)
-        }
-        // Ask the server to start streaming events. Tolerate servers that don't
-        // implement an explicit subscribe.
-        _ = try? await call(Method.subscribe)
+        // No request/event channels yet — RPCs open one channel each, and
+        // `subscribe(_:)` opens the persistent event channel.
     }
 
     public func disconnect() async {
-        consumeTask?.cancel()
+        for task in subscriptionTasks { task.cancel() }
+        subscriptionTasks.removeAll()
         await transport.disconnect()
-        failAllPending(HerdrError.transportClosed)
         eventsContinuation.finish()
     }
 
@@ -60,30 +51,52 @@ public actor HerdrClient {
         _ = try await call(Method.ping)
     }
 
+    /// Build the nested workspace tree from Herdr's flat, granular endpoints:
+    /// `workspace.list` + a single global `pane.list` + `tab.list` per workspace
+    /// + best-effort `agent.list` (for agent names). `HerdrClient` is the
+    /// anti-corruption layer; the UI keeps seeing a nested tree.
     public func listWorkspaces() async throws -> [Workspace] {
-        let result = try await call(Method.workspaceList)
-        if let ws = result["workspaces"] { return try ws.decoded([Workspace].self) }
-        return try result.decoded([Workspace].self)
+        let wsList = try await call(Method.workspaceList).decodedSnake(WorkspaceListResult.self)
+        let paneList = try await call(Method.paneList).decodedSnake(PaneListResult.self)
+        let agentNames = await agentNameMap()
+        let panesByTab = Dictionary(grouping: paneList.panes, by: \.tabId)
+
+        var workspaces: [Workspace] = []
+        for ws in wsList.workspaces {
+            let tabList = try await call(
+                Method.tabList, .object(["workspace_id": .string(ws.workspaceId)])
+            ).decodedSnake(TabListResult.self)
+
+            let tabs = tabList.tabs.map { tab in
+                Tab(
+                    id: TabID(tab.tabId),
+                    label: tab.label,
+                    panes: (panesByTab[tab.tabId] ?? []).map { makePane($0, agentNames) }
+                )
+            }
+            let allPanes = tabs.flatMap(\.panes)
+            let cwd = (allPanes.first(where: \.isFocused) ?? allPanes.first)?.cwd
+            workspaces.append(Workspace(id: WorkspaceID(ws.workspaceId), label: ws.label, cwd: cwd, tabs: tabs))
+        }
+        return workspaces
     }
 
     /// Read recent scrollback for a pane, returned as lines.
     public func readPane(_ pane: PaneID, lines: Int = 200) async throws -> [String] {
         let result = try await call(Method.paneRead, .object([
-            "pane": .string(pane.rawValue),
-            "source": .string("recent"),
-            "lines": .int(lines),
+            "pane_id": .string(pane.rawValue),
+            "source": .string(PaneReadSource.recent),
         ]))
-        if let arr = result["lines"]?.arrayValue { return arr.compactMap(\.stringValue) }
-        if let text = result["text"]?.stringValue {
-            return text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
-        }
-        return []
+        guard let text = try result.decodedSnake(PaneReadResult.self).read.text else { return [] }
+        var split = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        if split.last == "" { split.removeLast() } // drop the artifact of a trailing newline
+        return split
     }
 
     /// Send literal text to a pane without a trailing newline.
     public func sendText(_ text: String, to pane: PaneID) async throws {
         _ = try await call(Method.paneSendText, .object([
-            "pane": .string(pane.rawValue),
+            "pane_id": .string(pane.rawValue),
             "text": .string(text),
         ]))
     }
@@ -91,7 +104,7 @@ public actor HerdrClient {
     /// Send a key press (e.g. `"Enter"`) to a pane.
     public func sendKeys(_ keys: String, to pane: PaneID) async throws {
         _ = try await call(Method.paneSendKeys, .object([
-            "pane": .string(pane.rawValue),
+            "pane_id": .string(pane.rawValue),
             "keys": .string(keys),
         ]))
     }
@@ -102,44 +115,72 @@ public actor HerdrClient {
         try await sendKeys("Enter", to: pane)
     }
 
+    /// Open live subscriptions on a persistent event channel. Each call opens
+    /// its own channel (Herdr streams events per subscription connection); the
+    /// pushed events are funnelled into `eventStream`.
+    public func subscribe(_ subscriptions: [EventSubscription]) async throws {
+        let objects = subscriptions.flatMap(\.jsonObjects)
+        guard !objects.isEmpty else { return }
+        nextID += 1
+        let request = RPCRequest(
+            id: "sub_\(nextID)",
+            method: Method.eventsSubscribe,
+            params: .object(["subscriptions": .array(objects)])
+        )
+        let stream = transport.events(request)
+        let task = Task { [weak self] in
+            for await message in stream {
+                if case .event(let raw) = message, let domain = HerdrEvent(raw) {
+                    await self?.emit(domain)
+                }
+            }
+        }
+        subscriptionTasks.append(task)
+    }
+
+    private func emit(_ event: HerdrEvent) { eventsContinuation.yield(event) }
+
+    // MARK: Assembly helpers
+
+    /// Best-effort `pane_id → agent name` map. `agent.list`'s shape isn't pinned
+    /// down (it's empty unless agents run), so parse defensively and tolerate any
+    /// shape — names are enrichment, not correctness.
+    private func agentNameMap() async -> [String: String] {
+        guard let result = try? await call(Method.agentList),
+              let agents = result["agents"]?.arrayValue else { return [:] }
+        var map: [String: String] = [:]
+        for agent in agents {
+            guard let paneID = agent["pane_id"]?.stringValue else { continue }
+            let name = agent["name"]?.stringValue ?? agent["agent"]?.stringValue
+                ?? agent["kind"]?.stringValue ?? agent["title"]?.stringValue
+            if let name { map[paneID] = name }
+        }
+        return map
+    }
+
+    private func makePane(_ dto: PaneInfoDTO, _ agentNames: [String: String]) -> Pane {
+        let status = dto.agentStatus.flatMap(AgentStatus.init(rawValue:)) ?? .unknown
+        let name = agentNames[dto.paneId]
+        let isAgent = name != nil || status != .unknown
+        let title = name ?? "shell"
+        return Pane(
+            id: PaneID(dto.paneId),
+            title: title,
+            agent: name,
+            status: status,
+            isFocused: dto.focused ?? false,
+            cwd: dto.foregroundCwd ?? dto.cwd,
+            isAgent: isAgent
+        )
+    }
+
     // MARK: Request plumbing
 
     private func call(_ method: String, _ params: JSONValue = .object([:])) async throws -> JSONValue {
         nextID += 1
-        let id = "req_\(nextID)"
-        let request = RPCRequest(id: id, method: method, params: params)
-
-        let response: RPCResponse = try await withCheckedThrowingContinuation { continuation in
-            pending[id] = continuation
-            Task {
-                do {
-                    try await transport.send(request)
-                } catch {
-                    // Send failed before any reply could arrive.
-                    if let waiting = pending.removeValue(forKey: id) {
-                        waiting.resume(throwing: error)
-                    }
-                }
-            }
-        }
-
+        let request = RPCRequest(id: "req_\(nextID)", method: method, params: params)
+        let response = try await transport.request(request)
         if let error = response.error { throw HerdrError.rpc(error) }
         return response.result ?? .null
-    }
-
-    private func handle(_ message: IncomingMessage) {
-        switch message {
-        case .response(let response):
-            guard let id = response.id, let continuation = pending.removeValue(forKey: id) else { return }
-            continuation.resume(returning: response)
-        case .event(let event):
-            if let domain = HerdrEvent(event) { eventsContinuation.yield(domain) }
-        }
-    }
-
-    private func failAllPending(_ error: Error) {
-        let waiting = pending
-        pending.removeAll()
-        for (_, continuation) in waiting { continuation.resume(throwing: error) }
     }
 }

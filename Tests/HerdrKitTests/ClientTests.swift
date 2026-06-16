@@ -2,14 +2,22 @@ import XCTest
 @testable import HerdrKit
 
 final class ClientTests: XCTestCase {
-    /// Exercises the full request → transport → response → continuation path.
-    func testListWorkspacesRoundTrip() async throws {
+    /// Exercises assembly: workspace.list + pane.list + tab.list + agent.list →
+    /// nested tree.
+    func testListWorkspacesAssemblesTree() async throws {
         let client = HerdrClient(transport: MockTransport(tickInterval: .seconds(3600)))
         try await client.connect()
 
         let workspaces = try await client.listWorkspaces()
         XCTAssertEqual(workspaces.map(\.label), ["herdr-ios", "api-server", "infra"])
         XCTAssertEqual(workspaces[0].aggregateStatus, .blocked, "blocked agent should win the badge")
+
+        // Panes are grouped under the right tabs from the global pane.list.
+        XCTAssertEqual(workspaces[0].tabs.map(\.label), ["agents", "shell"])
+        XCTAssertEqual(workspaces[0].tabs[0].panes.count, 2)
+        let claude = workspaces[0].tabs[0].panes.first { $0.id == "1-1" }
+        XCTAssertEqual(claude?.agent, "claude")
+        XCTAssertTrue(claude?.isAgent == true)
     }
 
     func testReadPaneReturnsLines() async throws {
@@ -20,29 +28,23 @@ final class ClientTests: XCTestCase {
         XCTAssertTrue(lines.contains { $0.contains("Waiting for your confirmation") })
     }
 
-    /// A server-pushed event must surface on the client's event stream as a
-    /// typed `HerdrEvent`.
-    func testEventStreamDeliversStatusChange() async throws {
-        let transport = MockTransport(tickInterval: .seconds(3600))
-        let client = HerdrClient(transport: transport)
+    /// Subscribing opens the persistent event channel; pushed status changes
+    /// must surface as typed `HerdrEvent`s.
+    func testSubscribeDeliversStatusChanges() async throws {
+        let client = HerdrClient(transport: MockTransport(tickInterval: .milliseconds(20)))
         try await client.connect()
+        try await client.subscribe([.topology])
 
         let received = Task { () -> HerdrEvent? in
             for await event in await client.eventStream {
-                if case .agentStatus(let pane, _) = event, pane == "1-1" { return event }
+                if case .agentStatus = event { return event }
             }
             return nil
         }
-
-        await transport.emit(RPCEvent(method: EventMethod.agentStatus, params: .object([
-            "pane": .string("1-1"), "status": .string("done"),
-        ])))
-
         let event = await received.value
-        guard case .agentStatus(let pane, let status)? = event else {
+        guard case .agentStatus(let pane, _)? = event else {
             return XCTFail("expected an agentStatus event")
         }
-        XCTAssertEqual(pane, "1-1")
-        XCTAssertEqual(status, .done)
+        XCTAssertFalse(pane.rawValue.isEmpty)
     }
 }

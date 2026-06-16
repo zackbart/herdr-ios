@@ -1,35 +1,77 @@
 import Foundation
 
-/// Socket RPC method names, centralized so they map cleanly to Herdr's CLI verbs
-/// and can be corrected in one place.
-///
-/// These are derived from the documented CLI (`workspace list`, `pane read`,
-/// `pane send-text`, …). The exact wire `method` strings — and the
-/// subscribe/event method names — must be confirmed against
-/// https://herdr.dev/docs/socket-api/ when wiring the real SSH transport. They
-/// are isolated here precisely so that confirmation is a one-file change.
+/// Socket RPC method names, verified against a live Herdr server (protocol 14).
+/// Methods are dot-namespaced; parameter keys are snake_case (`pane_id`, …).
 public enum Method {
     public static let ping = "ping"
 
     public static let workspaceList = "workspace.list"
+    public static let workspaceGet = "workspace.get"
     public static let tabList = "tab.list"
     public static let paneList = "pane.list"
+    public static let paneGet = "pane.get"
+    public static let agentList = "agent.list"
 
     public static let paneRead = "pane.read"
-    public static let paneSendText = "pane.send-text"
-    public static let paneSendKeys = "pane.send-keys"
-    public static let paneSplit = "pane.split"
+    public static let paneSendText = "pane.send_text"
+    public static let paneSendKeys = "pane.send_keys"
 
     /// Open a live subscription; the server then streams events on the socket.
-    public static let subscribe = "subscribe"
+    public static let eventsSubscribe = "events.subscribe"
 }
 
-/// Event method names pushed by the server over a subscription.
-public enum EventMethod {
-    /// An agent's status changed: `{"pane": "1-1", "status": "working"}`.
-    public static let agentStatus = "agent-status"
-    /// New pane output: `{"pane": "1-1", "chunk": "…"}`.
-    public static let output = "output"
-    /// Workspace/tab/pane topology changed; clients should re-list.
-    public static let topologyChanged = "topology-changed"
+/// Valid `source` values for `pane.read`.
+public enum PaneReadSource {
+    public static let visible = "visible"
+    public static let recent = "recent"
+    public static let recentUnwrapped = "recent_unwrapped"
+    public static let detection = "detection"
+}
+
+/// Subscription `type` strings (dot-namespaced) sent inside
+/// `events.subscribe`'s `subscriptions` array.
+public enum SubscriptionType {
+    public static let paneAgentStatusChanged = "pane.agent_status_changed"
+
+    /// Topology-changing subscriptions that don't need a resource id — any of
+    /// these means "re-list". (Per-resource events like `pane.focused` require a
+    /// `pane_id` and are intentionally omitted.)
+    public static let topology = [
+        "workspace.created", "workspace.updated", "workspace.closed", "workspace.renamed",
+        "tab.created", "tab.closed", "tab.renamed",
+        "pane.created", "pane.closed", "pane.moved", "pane.exited", "pane.agent_detected",
+    ]
+}
+
+/// A subscription request, expanded into the wire `subscriptions` objects.
+public enum EventSubscription: Sendable {
+    /// All topology-changing events (re-list trigger).
+    case topology
+    /// Agent-status changes for a specific pane.
+    case paneAgentStatus(PaneID)
+
+    var jsonObjects: [JSONValue] {
+        switch self {
+        case .topology:
+            return SubscriptionType.topology.map { .object(["type": .string($0)]) }
+        case .paneAgentStatus(let pane):
+            return [.object([
+                "type": .string(SubscriptionType.paneAgentStatusChanged),
+                "pane_id": .string(pane.rawValue),
+            ])]
+        }
+    }
+}
+
+/// Pushed-event names (underscored) received on the wire, e.g.
+/// `{"event":"pane_agent_status_changed","data":{…}}`.
+public enum EventName {
+    public static let paneAgentStatusChanged = "pane_agent_status_changed"
+
+    /// Pushed events that imply the workspace/tab/pane tree changed.
+    public static let topology: Set<String> = [
+        "workspace_created", "workspace_updated", "workspace_closed", "workspace_renamed",
+        "tab_created", "tab_closed", "tab_renamed",
+        "pane_created", "pane_closed", "pane_moved", "pane_exited", "pane_agent_detected",
+    ]
 }

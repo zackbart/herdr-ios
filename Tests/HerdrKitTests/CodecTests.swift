@@ -23,22 +23,53 @@ final class CodecTests: XCTestCase {
         XCTAssertNil(response.error)
     }
 
-    func testDecodeEventMessage() throws {
-        let line = Data(#"{"method":"agent-status","params":{"pane":"1-1","status":"blocked"}}"#.utf8)
+    /// Herdr pushes events as `{"event":"…","data":{…}}` (real wire sample).
+    func testDecodePushedStatusEvent() throws {
+        let line = Data(#"{"event":"pane_agent_status_changed","data":{"type":"pane_agent_status_changed","pane_id":"w4:p1","agent_status":"working"}}"#.utf8)
         guard case .event(let event) = try IncomingMessage.decode(line: line) else {
             return XCTFail("expected an event")
         }
-        XCTAssertEqual(event.method, "agent-status")
+        XCTAssertEqual(event.method, "pane_agent_status_changed")
         XCTAssertEqual(HerdrEvent(event).map(String.init(describing:)),
-                       String(describing: HerdrEvent.agentStatus(pane: "1-1", status: .blocked)))
+                       String(describing: HerdrEvent.agentStatus(pane: "w4:p1", status: .working)))
     }
 
-    func testDecodeErrorResponse() throws {
-        let line = Data(#"{"id":"req_2","error":{"code":-32601,"message":"method not found"}}"#.utf8)
+    /// A topology event (real wire sample) maps to `.topologyChanged`.
+    func testDecodeTopologyEvent() throws {
+        let line = Data(#"{"event":"tab_closed","data":{"type":"tab_closed","tab_id":"w4:t2","workspace_id":"w4"}}"#.utf8)
+        guard case .event(let event) = try IncomingMessage.decode(line: line),
+              case .topologyChanged? = HerdrEvent(event) else {
+            return XCTFail("expected a topologyChanged event")
+        }
+    }
+
+    /// Herdr returns string error codes; decoding must not drop the message.
+    func testDecodeErrorResponseWithStringCode() throws {
+        let line = Data(#"{"id":"r","error":{"code":"invalid_request","message":"missing field `pane_id`"}}"#.utf8)
         guard case .response(let response) = try IncomingMessage.decode(line: line) else {
             return XCTFail("expected a response")
         }
-        XCTAssertEqual(response.error?.code, -32601)
+        XCTAssertEqual(response.error?.code, "invalid_request")
+        XCTAssertEqual(response.error?.message, "missing field `pane_id`")
+    }
+
+    // MARK: Real wire fixtures (captured from a live server, protocol 14)
+
+    func testWorkspaceListDecodesRealShape() throws {
+        let line = Data(#"{"type":"workspace_list","workspaces":[{"workspace_id":"w4","number":1,"label":"~","focused":true,"pane_count":1,"tab_count":1,"active_tab_id":"w4:t1","agent_status":"unknown"}]}"#.utf8)
+        let value = try JSONDecoder().decode(JSONValue.self, from: line)
+        let result = try value.decodedSnake(WorkspaceListResult.self)
+        XCTAssertEqual(result.workspaces.count, 1)
+        XCTAssertEqual(result.workspaces[0].workspaceId, "w4")
+        XCTAssertEqual(result.workspaces[0].activeTabId, "w4:t1")
+        XCTAssertEqual(result.workspaces[0].agentStatus, "unknown")
+    }
+
+    func testPaneReadDecodesRealShape() throws {
+        let line = Data(#"{"type":"pane_read","read":{"pane_id":"w4:p1","source":"recent","format":"text","text":"line a\nline b\n","truncated":false}}"#.utf8)
+        let value = try JSONDecoder().decode(JSONValue.self, from: line)
+        let read = try value.decodedSnake(PaneReadResult.self).read
+        XCTAssertEqual(read.text, "line a\nline b\n")
     }
 
     func testLineBufferSplitsAndRetainsPartials() {

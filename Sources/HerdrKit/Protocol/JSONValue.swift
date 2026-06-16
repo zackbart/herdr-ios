@@ -67,4 +67,12 @@ public extension JSONValue {
         let data = try JSONEncoder().encode(self)
         return try JSONDecoder().decode(type, from: data)
     }
+
+    /// Decode using Herdr's snake_case wire keys (`workspace_id` → `workspaceId`).
+    func decodedSnake<T: Decodable>(_ type: T.Type) throws -> T {
+        let data = try JSONEncoder().encode(self)
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        return try decoder.decode(type, from: data)
+    }
 }

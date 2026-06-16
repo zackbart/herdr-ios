@@ -1,21 +1,27 @@
 import Foundation
 
-/// A bidirectional channel to a Herdr socket. Implementations are intentionally
-/// dumb: they move framed messages in and out. Request/response correlation and
-/// event routing live in `HerdrClient`, so the UI is identical whether the
-/// underlying transport is a Mock (in-memory) or a real SSH-bridged socket.
+/// A connection to a Herdr socket.
+///
+/// Herdr's socket is **one-request-per-connection** for RPC: you open a
+/// connection, send one request, read its reply, and the server closes it.
+/// Only `events.subscribe` keeps a connection open (to stream events). The
+/// transport models exactly that: `request` is a one-shot round-trip, `events`
+/// opens a persistent subscription stream. Request/response correlation isn't
+/// needed — each request has its own connection, so its reply is unambiguous.
 public protocol HerdrTransport: Sendable {
-    /// Open the connection (and, for stream transports, start reading).
+    /// Establish the underlying connection (e.g. the SSH session). Per-request
+    /// channels are opened lazily.
     func connect() async throws
 
-    /// Write a single request frame to the socket.
-    func send(_ request: RPCRequest) async throws
+    /// One-shot request/response: open a channel, send the request, read the
+    /// single reply, and let the server close the channel.
+    func request(_ request: RPCRequest) async throws -> RPCResponse
 
-    /// Stream of incoming server messages (responses and events), already
-    /// line-split and decoded. Consume this exactly once.
-    func messages() -> AsyncStream<IncomingMessage>
+    /// Open a persistent subscription: send `subscribeRequest`, then stream every
+    /// pushed message until the channel closes or the stream is cancelled.
+    func events(_ subscribeRequest: RPCRequest) -> AsyncStream<IncomingMessage>
 
-    /// Close the connection and finish the `messages()` stream.
+    /// Close the connection.
     func disconnect() async
 }
 
