@@ -1,23 +1,25 @@
 import Foundation
+import Citadel
+import Crypto // `Insecure` namespace (Citadel adds `Insecure.RSA`)
+import NIOCore // `ByteBuffer`
 import HerdrKit
 
-/// SSH-bridged transport to a remote Herdr Unix socket — **scaffold**.
+/// SSH-bridged transport to a remote Herdr Unix socket.
 ///
 /// Herdr exposes no network port: its socket API is a local Unix domain socket
-/// (`~/.config/herdr/herdr.sock`). The intended design for reaching it from iOS:
+/// (`~/.config/herdr/herdr.sock`). We reach it the same way the official tooling
+/// does — over SSH:
 ///
 ///  1. Open an SSH connection to `host` (Citadel / SwiftNIO SSH) using
 ///     `credential` (private key or password).
-///  2. Start an exec channel that bridges stdio to the socket, e.g.
-///     `socat - UNIX-CONNECT:<socketPath>` (fallback `nc -U <socketPath>`).
+///  2. Start an exec channel that bridges stdio to the socket with
+///     `socat - UNIX-CONNECT:<socketPath>` (falling back to `nc -U <socketPath>`).
 ///  3. Write request frames to the channel's stdin via `NDJSON.frame`, and feed
 ///     the channel's stdout through `LineBuffer` → `IncomingMessage.decode` →
 ///     `continuation.yield(_:)`. The persistent duplex channel makes live event
 ///     subscriptions work, exactly like a direct socket connection.
 ///
-/// The connection/auth surface and the `HerdrTransport` plumbing are in place;
-/// the Citadel channel bridge (step 2/3) is the agreed follow-up and currently
-/// surfaces a friendly `HerdrError.sshNotWired`. See README "SSH transport".
+/// Host-key validation currently accepts any key (TOFU pinning is a follow-up).
 public actor SSHTransport: HerdrTransport {
     private let host: Host
     private let credential: Credential
@@ -26,7 +28,19 @@ public actor SSHTransport: HerdrTransport {
     private let continuation: AsyncStream<IncomingMessage>.Continuation
     private var lineBuffer = LineBuffer()
 
-    public init(host: Host, credential: Credential) {
+    private var client: SSHClient?
+    private var channelTask: Task<Void, Never>?
+    private var writer: TTYStdinWriter?
+
+    /// Resumed exactly once when the exec channel goes live (success) or when it
+    /// fails/closes before ever opening (failure).
+    private var connectContinuation: CheckedContinuation<Void, Error>?
+    private var didSignalConnect = false
+    /// Remote stderr captured during connect, surfaced if the bridge dies early
+    /// (e.g. neither `socat` nor `nc` is installed, or the socket path is wrong).
+    private var capturedStderr = ""
+
+    init(host: Host, credential: Credential) {
         self.host = host
         self.credential = credential
         var continuation: AsyncStream<IncomingMessage>.Continuation!
@@ -37,33 +51,148 @@ public actor SSHTransport: HerdrTransport {
     public nonisolated func messages() -> AsyncStream<IncomingMessage> { stream }
 
     public func connect() async throws {
-        // TODO(ssh): replace this stub with the Citadel-based bridge described
-        // above. Validation that the config is at least usable:
+        guard client == nil else { return }
         guard !host.hostname.isEmpty, !host.username.isEmpty else {
-            throw HerdrError.sshNotWired("This host is missing a hostname or username.")
+            throw HerdrError.connectionFailed("This host is missing a hostname or username.")
         }
-        throw HerdrError.sshNotWired(
-            "SSH isn't wired up yet — connecting to \(host.displayName) lands with the "
-            + "Citadel socket bridge. Tap “Open demo workspace” to explore the app now."
-        )
+
+        let auth = try authenticationMethod()
+        let client: SSHClient
+        do {
+            client = try await SSHClient.connect(
+                host: host.hostname,
+                port: host.port,
+                authenticationMethod: auth,
+                hostKeyValidator: .acceptAnything(),
+                reconnect: .never
+            )
+        } catch {
+            throw HerdrError.connectionFailed("Couldn't connect to \(host.displayName): \(error)")
+        }
+        self.client = client
+
+        // Open the bridge exec channel and suspend until it's live (so the first
+        // `send` has a writer) or it fails during setup.
+        let command = Self.bridgeCommand(socketPath: host.socketPath)
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            self.connectContinuation = continuation
+            self.channelTask = Task { [weak self] in
+                guard let self else { return }
+                do {
+                    try await client.withExec(command) { inbound, outbound in
+                        await self.channelOpened(writer: outbound)
+                        for try await chunk in inbound {
+                            if case .stdout(let buffer) = chunk {
+                                await self.ingest(buffer)
+                            } else if case .stderr(let buffer) = chunk {
+                                await self.captureStderr(buffer)
+                            }
+                        }
+                    }
+                    await self.channelClosed(error: nil)
+                } catch {
+                    await self.channelClosed(error: error)
+                }
+            }
+        }
     }
 
     public func send(_ request: RPCRequest) async throws {
-        // TODO(ssh): write `try NDJSON.frame(request)` to the exec channel stdin.
-        _ = try NDJSON.frame(request)
-        throw HerdrError.notConnected
+        guard let writer else { throw HerdrError.notConnected }
+        let frame = try NDJSON.frame(request)
+        try await writer.write(ByteBuffer(bytes: frame))
     }
 
-    /// Feed raw channel bytes here once the SSH read loop exists.
-    private func ingest(_ bytes: Data) {
-        for line in lineBuffer.append(bytes) {
+    public func disconnect() async {
+        channelTask?.cancel()
+        channelTask = nil
+        writer = nil
+        if let client {
+            try? await client.close()
+        }
+        client = nil
+        continuation.finish()
+    }
+
+    // MARK: Channel lifecycle
+
+    private func channelOpened(writer: TTYStdinWriter) {
+        self.writer = writer
+        signalConnect(.success(()))
+    }
+
+    private func channelClosed(error: Error?) {
+        // Closed before the bridge ever went live → this *is* the connect failure.
+        if !didSignalConnect {
+            let stderr = capturedStderr.trimmingCharacters(in: .whitespacesAndNewlines)
+            let detail = !stderr.isEmpty ? stderr
+                : (error.map { "\($0)" } ?? "the bridge command exited immediately")
+            signalConnect(.failure(HerdrError.connectionFailed(
+                "Couldn't open the Herdr socket bridge — \(detail). "
+                + "Check that `socat` (or `nc`) is installed on the host and that the socket path is correct."
+            )))
+        }
+        writer = nil
+        continuation.finish()
+    }
+
+    private func signalConnect(_ result: Result<Void, Error>) {
+        guard !didSignalConnect else { return }
+        didSignalConnect = true
+        connectContinuation?.resume(with: result)
+        connectContinuation = nil
+    }
+
+    // MARK: Byte plumbing
+
+    private func ingest(_ buffer: ByteBuffer) {
+        guard let bytes = buffer.getBytes(at: buffer.readerIndex, length: buffer.readableBytes) else { return }
+        for line in lineBuffer.append(Data(bytes)) {
             if let message = try? IncomingMessage.decode(line: line) {
                 continuation.yield(message)
             }
         }
     }
 
-    public func disconnect() async {
-        continuation.finish()
+    private func captureStderr(_ buffer: ByteBuffer) {
+        guard capturedStderr.count < 2_000,
+              let bytes = buffer.getBytes(at: buffer.readerIndex, length: buffer.readableBytes),
+              let text = String(bytes: bytes, encoding: .utf8) else { return }
+        capturedStderr += text
+    }
+
+    // MARK: Helpers
+
+    private func authenticationMethod() throws -> SSHAuthenticationMethod {
+        switch host.authMethod {
+        case .password:
+            guard let password = credential.password, !password.isEmpty else {
+                throw HerdrError.connectionFailed("No password saved for \(host.displayName).")
+            }
+            return .passwordBased(username: host.username, password: password)
+
+        case .privateKey:
+            guard let pem = credential.privateKey, !pem.isEmpty else {
+                throw HerdrError.connectionFailed("No private key saved for \(host.displayName).")
+            }
+            do {
+                let key = try Insecure.RSA.PrivateKey(sshRsa: pem)
+                return .rsa(username: host.username, privateKey: key)
+            } catch {
+                throw HerdrError.connectionFailed(
+                    "Couldn't read this private key. Key auth currently supports OpenSSH-format "
+                    + "RSA keys only — use an RSA key or password auth for now."
+                )
+            }
+        }
+    }
+
+    /// Shell command run on the remote host to bridge stdio to the Herdr socket.
+    /// A leading `~` is rewritten to `$HOME` so the remote shell expands it
+    /// (tilde expansion doesn't fire mid-word, but `$HOME` does).
+    static func bridgeCommand(socketPath: String) -> String {
+        let expanded = socketPath.hasPrefix("~") ? "$HOME" + socketPath.dropFirst() : socketPath
+        let quoted = "\"\(expanded)\""
+        return "socat - UNIX-CONNECT:\(quoted) || nc -U \(quoted)"
     }
 }

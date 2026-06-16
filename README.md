@@ -4,9 +4,11 @@ A native iOS (SwiftUI) client for [Herdr](https://herdr.dev), the terminal-nativ
 **agent multiplexer**. Browse your workspaces, watch live agent status, and read
 or drive any pane from your phone.
 
-> **Status:** the full app runs today on an in-memory **Mock** transport with
-> realistic data and live status updates. The SSH transport is scaffolded; the
-> socket bridge is a tracked follow-up (see [SSH transport](#ssh-transport)).
+> **Status:** the full app runs on an in-memory **Mock** transport with realistic
+> data and live status updates, *and* over a real **SSH** connection that bridges
+> to the remote Herdr Unix socket (see [SSH transport](#ssh-transport)). Known
+> limitations: key auth currently supports OpenSSH-format RSA keys only, and host
+> keys are accepted without pinning (TOFU is a follow-up).
 
 ## Why SSH?
 
@@ -78,19 +80,32 @@ its panes/agents, and open a pane to watch streamed output and send input.
 
 ## SSH transport
 
-`App/Herdr/Connection/SSHTransport.swift` is the scaffold and documents the
-intended bridge. To complete it:
+`App/Herdr/Connection/SSHTransport.swift` implements the bridge with **Citadel**
+(SwiftNIO SSH):
 
-1. Add **Citadel** (SwiftNIO SSH) — uncomment it in `project.yml`, re-run
-   `xcodegen generate`.
-2. In `connect()`, open an SSH connection with the host's `Credential`
-   (key/password from the Keychain), start an exec channel running
-   `socat - UNIX-CONNECT:<socketPath>` (fallback `nc -U <socketPath>`), and feed
-   the channel's stdout through the existing `LineBuffer` → `IncomingMessage.decode`
-   → `continuation.yield`. Implement `send(_:)` with `NDJSON.frame`.
-3. Confirm the exact socket `method` strings and the subscribe/event method names
-   in `Sources/HerdrKit/Protocol/Method.swift` against
-   <https://herdr.dev/docs/socket-api/>.
+1. `connect()` opens an `SSHClient` connection authenticated with the host's
+   `Credential` (password, or an OpenSSH-format RSA private key, from the
+   Keychain).
+2. It then opens a `withExec` channel running
+   `socat - UNIX-CONNECT:<socketPath> || nc -U <socketPath>` and suspends until
+   the channel is live. The channel's stdout is fed through the existing
+   `LineBuffer` → `IncomingMessage.decode` → `continuation.yield`; `send(_:)`
+   writes `NDJSON.frame(request)` to the channel's stdin. A leading `~` in the
+   socket path is rewritten to `$HOME` so the remote shell expands it.
+
+To switch the app onto SSH, point `AppModel.connect(to:)` at a saved `Host` (it
+already builds an `SSHTransport`); the demo entry point stays on the Mock.
+
+**Follow-ups:**
+
+- Key auth handles OpenSSH-format **RSA** keys only (`Insecure.RSA.PrivateKey`).
+  Ed25519/ECDSA support needs a proper OpenSSH key parser; password auth works
+  for everything in the meantime.
+- Host keys are accepted via `.acceptAnything()`. Add trust-on-first-use pinning
+  before treating this as secure against MITM.
+- Confirm the exact socket `method` strings and subscribe/event names in
+  `Sources/HerdrKit/Protocol/Method.swift` against
+  <https://herdr.dev/docs/socket-api/>.
 
 ## References
 

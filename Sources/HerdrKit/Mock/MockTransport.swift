@@ -82,7 +82,7 @@ public actor MockTransport: HerdrTransport {
                 return RPCResponse(id: request.id, result: payload, error: nil)
 
             case Method.paneRead:
-                let pane = request.params["pane"]?.stringValue.map(PaneID.init)
+                let pane = request.params["pane"]?.stringValue.map { PaneID($0) }
                 let lines = pane.flatMap { output[$0] } ?? []
                 return RPCResponse(
                     id: request.id,

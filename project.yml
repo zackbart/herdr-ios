@@ -17,12 +17,19 @@ options:
 packages:
   HerdrKit:
     path: .
-  # SSH transport dependency — uncomment when wiring the real socket bridge
-  # (see App/Herdr/Connection/SSHTransport.swift and the README). Left out for
-  # now so the project builds cleanly with the SSH transport stubbed.
-  # Citadel:
-  #   url: https://github.com/orlandos-nl/Citadel.git
-  #   from: "0.7.0"
+  # SSH transport dependency — powers the real socket bridge in
+  # App/Herdr/Connection/SSHTransport.swift.
+  Citadel:
+    url: https://github.com/orlandos-nl/Citadel.git
+    from: "0.7.0"
+  # Citadel's transitive deps that SSHTransport imports directly: NIOCore for
+  # `ByteBuffer`, swift-crypto for the `Insecure` namespace Citadel extends.
+  swift-nio:
+    url: https://github.com/apple/swift-nio.git
+    from: "2.0.0"
+  swift-crypto:
+    url: https://github.com/apple/swift-crypto.git
+    from: "3.0.0"
 
 targets:
   Herdr:
@@ -33,7 +40,12 @@ targets:
     dependencies:
       - package: HerdrKit
         product: HerdrKit
-      # - package: Citadel
+      - package: Citadel
+        product: Citadel
+      - package: swift-nio
+        product: NIOCore
+      - package: swift-crypto
+        product: Crypto
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.herdr.client

@@ -29,7 +29,7 @@ final class AppModel {
         }
     }
 
-    /// Connect to a saved host over SSH (currently surfaces `sshNotWired`).
+    /// Connect to a saved host over SSH, bridging to its Herdr Unix socket.
     func connect(to host: Host) async {
         let credential = connections.credential(for: host)
         await connect(label: host.displayName) {
@@ -58,7 +58,10 @@ final class AppModel {
     }
 
     private func friendlyMessage(for error: Error) -> String {
-        if case HerdrError.sshNotWired(let message) = error { return message }
-        return String(describing: error)
+        switch error {
+        case HerdrError.connectionFailed(let message): return message
+        case HerdrError.sshNotWired(let message): return message
+        default: return String(describing: error)
+        }
     }
 }

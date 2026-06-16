@@ -23,6 +23,11 @@ public enum HerdrError: Error, Sendable {
     case notConnected
     case transportClosed
     case rpc(RPCError)
-    /// The real SSH socket bridge is not wired up yet (tracked follow-up).
+    /// A human-readable SSH connection problem — bad credentials, unreachable
+    /// host, or a socket bridge that couldn't start. Carries a message safe to
+    /// show the user.
+    case connectionFailed(String)
+    /// Legacy friendly-message case retained for transports that are still
+    /// stubbed out; prefer `connectionFailed` for real failures.
     case sshNotWired(String)
 }
