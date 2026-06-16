@@ -128,14 +128,32 @@ public actor HerdrClient {
             params: .object(["subscriptions": .array(objects)])
         )
         let stream = transport.events(request)
-        let task = Task { [weak self] in
-            for await message in stream {
-                if case .event(let raw) = message, let domain = HerdrEvent(raw) {
-                    await self?.emit(domain)
+        // Confirm the channel opened (first message = the `subscription_started`
+        // ack) before returning, so a failed subscription throws and the caller
+        // can retry — then keep funnelling events in the background.
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            let task = Task { [weak self] in
+                var opened = false
+                for await message in stream {
+                    if !opened {
+                        opened = true
+                        if case .response(let response) = message, let error = response.error {
+                            continuation.resume(throwing: HerdrError.rpc(error))
+                            return
+                        }
+                        continuation.resume()
+                    }
+                    if case .event(let raw) = message, let domain = HerdrEvent(raw) {
+                        await self?.emit(domain)
+                    }
+                }
+                if !opened {
+                    continuation.resume(throwing: HerdrError.connectionFailed(
+                        "The event subscription closed before it started."))
                 }
             }
+            subscriptionTasks.append(task)
         }
-        subscriptionTasks.append(task)
     }
 
     private func emit(_ event: HerdrEvent) { eventsContinuation.yield(event) }

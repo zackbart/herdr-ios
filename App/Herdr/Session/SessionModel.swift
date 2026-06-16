@@ -38,16 +38,21 @@ final class SessionModel {
     /// haven't subscribed to yet. Safe to call after each refresh.
     private func syncSubscriptions() async {
         var subscriptions: [EventSubscription] = []
-        if !subscribedTopology {
-            subscriptions.append(.topology)
-            subscribedTopology = true
-        }
+        let needsTopology = !subscribedTopology
+        if needsTopology { subscriptions.append(.topology) }
         let agentPanes = Set(workspaces.flatMap(\.panes).filter(\.isAgent).map(\.id))
         let fresh = agentPanes.subtracting(subscribedPanes)
         subscriptions += fresh.map { .paneAgentStatus($0) }
-        subscribedPanes.formUnion(fresh)
         guard !subscriptions.isEmpty else { return }
-        try? await client.subscribe(subscriptions)
+        do {
+            try await client.subscribe(subscriptions)
+            // Mark as subscribed only on success → a failure is retried on the
+            // next refresh instead of being silently lost.
+            if needsTopology { subscribedTopology = true }
+            subscribedPanes.formUnion(fresh)
+        } catch {
+            // Leave unmarked; the next refresh will retry.
+        }
     }
 
     func refresh() async {

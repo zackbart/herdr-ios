@@ -29,10 +29,19 @@ public actor MockTransport: HerdrTransport {
         makeResponse(for: request)
     }
 
-    /// Persistent subscription: acks with `subscription_started`, then emits a
-    /// random agent-status change every `tickInterval` (the real event shape).
+    /// Persistent subscription: acks with `subscription_started`, then emits
+    /// agent-status changes (the real event shape) **only for the panes the
+    /// request subscribed to** via `pane.agent_status_changed`. A topology-only
+    /// subscription gets the ack and no status events — mirroring the server, so
+    /// tests exercise the real subscription wiring.
     public nonisolated func events(_ subscribeRequest: RPCRequest) -> AsyncStream<IncomingMessage> {
-        AsyncStream { continuation in
+        let subscribedPanes: [PaneID] = (subscribeRequest.params["subscriptions"]?.arrayValue ?? [])
+            .compactMap { sub in
+                sub["type"]?.stringValue == SubscriptionType.paneAgentStatusChanged
+                    ? sub["pane_id"]?.stringValue.map { PaneID($0) }
+                    : nil
+            }
+        return AsyncStream { continuation in
             let task = Task { [weak self] in
                 guard let self else { continuation.finish(); return }
                 continuation.yield(.response(RPCResponse(
@@ -41,11 +50,13 @@ public actor MockTransport: HerdrTransport {
                     error: nil
                 )))
                 let interval = await self.tickInterval
-                let panes = await self.agentPaneIDs
+                let agentPanes = await self.agentPaneIDs
+                let targets = subscribedPanes.filter(agentPanes.contains)
+                guard !targets.isEmpty else { return } // topology-only: ack, no status ticks
                 while !Task.isCancelled {
                     try? await Task.sleep(for: interval)
                     if Task.isCancelled { break }
-                    guard let pane = panes.randomElement() else { continue }
+                    guard let pane = targets.randomElement() else { continue }
                     let status = AgentStatus.allCases.filter { $0 != .unknown }.randomElement() ?? .working
                     continuation.yield(.event(RPCEvent(
                         method: EventName.paneAgentStatusChanged,

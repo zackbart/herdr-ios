@@ -28,23 +28,31 @@ final class ClientTests: XCTestCase {
         XCTAssertTrue(lines.contains { $0.contains("Waiting for your confirmation") })
     }
 
-    /// Subscribing opens the persistent event channel; pushed status changes
-    /// must surface as typed `HerdrEvent`s.
-    func testSubscribeDeliversStatusChanges() async throws {
+    /// Subscribing to a pane's status opens the persistent event channel and
+    /// delivers that pane's status changes as typed `HerdrEvent`s.
+    func testSubscribeDeliversStatusChangesForSubscribedPane() async throws {
         let client = HerdrClient(transport: MockTransport(tickInterval: .milliseconds(20)))
         try await client.connect()
-        try await client.subscribe([.topology])
+        try await client.subscribe([.paneAgentStatus("1-1")])
 
         let received = Task { () -> HerdrEvent? in
             for await event in await client.eventStream {
-                if case .agentStatus = event { return event }
+                if case .agentStatus(let pane, _) = event, pane == "1-1" { return event }
             }
             return nil
         }
         let event = await received.value
         guard case .agentStatus(let pane, _)? = event else {
-            return XCTFail("expected an agentStatus event")
+            return XCTFail("expected an agentStatus event for the subscribed pane")
         }
-        XCTAssertFalse(pane.rawValue.isEmpty)
+        XCTAssertEqual(pane, "1-1")
+    }
+
+    /// A topology-only subscription gets the ack but no status events (the mock
+    /// mirrors the server), so `subscribe` still returns without hanging.
+    func testTopologyOnlySubscriptionSucceeds() async throws {
+        let client = HerdrClient(transport: MockTransport(tickInterval: .milliseconds(20)))
+        try await client.connect()
+        try await client.subscribe([.topology]) // must not throw or hang
     }
 }

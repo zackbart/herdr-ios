@@ -81,10 +81,29 @@ public actor SSHTransport: HerdrTransport {
 
     // MARK: Request / response (one-shot per connection)
 
+    /// How long to wait for a one-shot reply before giving up. Herdr replies and
+    /// closes immediately; this only guards against a wedged bridge/connection.
+    private static let requestTimeout: Duration = .seconds(20)
+
     public func request(_ request: RPCRequest) async throws -> RPCResponse {
         guard let client, let socketPath else { throw HerdrError.notConnected }
-        let frame = try NDJSON.frame(request)
         let command = Self.bridgeCommand(socketPath: socketPath)
+        let frame = try NDJSON.frame(request)
+        return try await withThrowingTaskGroup(of: RPCResponse.self) { group in
+            group.addTask { try await Self.roundTrip(client: client, command: command, frame: frame) }
+            group.addTask {
+                try await Task.sleep(for: Self.requestTimeout)
+                throw HerdrError.connectionFailed("The Herdr request timed out (no reply from the host).")
+            }
+            defer { group.cancelAll() }
+            return try await group.next()!
+        }
+    }
+
+    /// Open a one-shot bridge channel, send the request, and return the first
+    /// decoded reply. The post-reply channel close is expected; a close with no
+    /// reply preserves the underlying failure.
+    private static func roundTrip(client: SSHClient, command: String, frame: Data) async throws -> RPCResponse {
         let collector = Collector()
         do {
             try await client.withExec(command) { inbound, outbound in
@@ -100,9 +119,6 @@ public actor SSHTransport: HerdrTransport {
                         }
                     }
                 } catch {
-                    // After a one-shot reply the server closes the socket, so the
-                    // bridge EOFs and the channel close surfaces here — expected
-                    // once we have a response, but a real failure otherwise.
                     collector.failure = error
                 }
             }
