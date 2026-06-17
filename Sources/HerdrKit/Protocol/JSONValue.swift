@@ -39,13 +39,6 @@ public enum JSONValue: Codable, Hashable, Sendable {
 }
 
 public extension JSONValue {
-    /// Build a JSON value by encoding any `Encodable` (used to embed models
-    /// into a `result`/`params` payload).
-    init<T: Encodable>(encoding value: T) throws {
-        let data = try JSONEncoder().encode(value)
-        self = try JSONDecoder().decode(JSONValue.self, from: data)
-    }
-
     /// Object member access: `value["pane"]`.
     subscript(_ key: String) -> JSONValue? {
         if case .object(let o) = self { return o[key] }
@@ -53,20 +46,7 @@ public extension JSONValue {
     }
 
     var stringValue: String? { if case .string(let s) = self { return s } else { return nil } }
-    var intValue: Int? {
-        switch self {
-        case .int(let i): return i
-        case .double(let d): return Int(d)
-        default: return nil
-        }
-    }
     var arrayValue: [JSONValue]? { if case .array(let a) = self { return a } else { return nil } }
-
-    /// Decode this JSON value into a concrete `Decodable` type.
-    func decoded<T: Decodable>(_ type: T.Type) throws -> T {
-        let data = try JSONEncoder().encode(self)
-        return try JSONDecoder().decode(type, from: data)
-    }
 
     /// Decode using Herdr's snake_case wire keys (`workspace_id` → `workspaceId`).
     func decodedSnake<T: Decodable>(_ type: T.Type) throws -> T {

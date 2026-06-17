@@ -68,9 +68,4 @@ public enum MockData {
             "  Plan: 0 to add, 1 to change, 0 to destroy.",
         ],
     ]
-
-    /// Pane ids that host an agent (eligible for simulated status flips).
-    public static var agentPaneIDs: [PaneID] {
-        workspaces.flatMap(\.agentPanes).map(\.id)
-    }
 }

@@ -7,8 +7,9 @@ or drive any pane from your phone.
 > **Status:** the full app runs on an in-memory **Mock** transport with realistic
 > data and live status updates, *and* over a real **SSH** connection that bridges
 > to the remote Herdr Unix socket (see [SSH transport](#ssh-transport)). Known
-> limitations: key auth currently supports OpenSSH-format RSA keys only, and host
-> keys are accepted without pinning (TOFU is a follow-up).
+> limitations: key auth currently supports OpenSSH ed25519 and RSA keys. Host
+> keys are pinned trust-on-first-use (TOFU): the key is remembered on first
+> connect and a later mismatch aborts with a clear warning.
 
 ## Why SSH?
 
@@ -103,11 +104,12 @@ already builds an `SSHTransport`); the demo entry point stays on the Mock.
 
 **Follow-ups:**
 
-- Key auth handles OpenSSH-format **RSA** keys only (`Insecure.RSA.PrivateKey`).
-  Ed25519/ECDSA support needs a proper OpenSSH key parser; password auth works
-  for everything in the meantime.
-- Host keys are accepted via `.acceptAnything()`. Add trust-on-first-use pinning
-  before treating this as secure against MITM.
+- Key auth handles OpenSSH **ed25519** and **RSA** keys (tried in that order);
+  ECDSA isn't wired yet. Password auth works for everything in the meantime.
+- Host keys are pinned **trust-on-first-use**: `SSHTransport`'s custom validator
+  records the key on first connect (`ConnectionStore` persists it on `Host`) and
+  rejects a changed key on later connects. Re-add the host to re-pin after a
+  legitimate server key change. No UI to inspect/manage pinned keys yet.
 - Socket auto-detect picks the default session, or the sole running one. When a
   host has *multiple* named sessions and no default, it currently picks the first;
   a session picker is a possible follow-up (override the socket path to choose for

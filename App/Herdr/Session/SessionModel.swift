@@ -144,8 +144,6 @@ final class SessionModel {
         switch event {
         case .agentStatus(let pane, let status):
             updateStatus(status, for: pane)
-        case .output(let pane, let chunk):
-            appendOutput(chunk, to: pane)
         case .topologyChanged:
             scheduleRefresh()
         }

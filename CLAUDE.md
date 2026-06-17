@@ -65,6 +65,10 @@ and `Crypto` (for the `Insecure` namespace Citadel extends) — both are Citadel
 transitive deps that `SSHTransport` imports directly, so they're linked
 explicitly. Re-run `xcodegen generate` after touching `project.yml`.
 
-Known limitations (intentional, tracked in README): key auth is OpenSSH **RSA**
-only; host keys are accepted via `.acceptAnything()` (no TOFU pinning yet). Verify
-method strings against <https://herdr.dev/docs/socket-api/>.
+Known limitations (intentional, tracked in README): key auth is OpenSSH ed25519
+or RSA (ECDSA not wired). Host keys are pinned **trust-on-first-use** — a custom
+`NIOSSHClientServerAuthenticationDelegate` records the key on first connect and
+rejects a mismatch later; the pinned key lives on `Host.knownHostKey`
+(`ConnectionStore.pinHostKey`). This is why `NIOSSH` is linked explicitly in
+`project.yml` — same fork/range Citadel pins, since it has no NIOSSH re-export.
+Verify method strings against <https://herdr.dev/docs/socket-api/>.

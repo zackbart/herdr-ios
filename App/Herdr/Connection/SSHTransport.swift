@@ -1,7 +1,8 @@
 import Foundation
 import Citadel
 import Crypto // `Insecure` namespace + Curve25519
-import NIOCore // `ByteBuffer`
+import NIOCore // `ByteBuffer`, `EventLoopPromise`
+import NIOSSH // `NIOSSHPublicKey` + host-key validation delegate (TOFU pinning)
 import HerdrKit
 
 /// SSH-bridged transport to a remote Herdr Unix socket.
@@ -16,13 +17,17 @@ import HerdrKit
 public actor SSHTransport: HerdrTransport {
     private let host: Host
     private let credential: Credential
+    /// Called with the OpenSSH host-key string after a first successful connect,
+    /// so the caller can pin it (TOFU). No-op for hosts already pinned.
+    private let pinHostKey: @Sendable (String) -> Void
 
     private var client: SSHClient?
     private var socketPath: String?
 
-    init(host: Host, credential: Credential) {
+    init(host: Host, credential: Credential, pinHostKey: @escaping @Sendable (String) -> Void = { _ in }) {
         self.host = host
         self.credential = credential
+        self.pinHostKey = pinHostKey
     }
 
     // MARK: Lifecycle
@@ -34,18 +39,33 @@ public actor SSHTransport: HerdrTransport {
         }
 
         let auth = try authenticationMethod()
+        // TOFU host-key pinning: trust the key on first connect and remember it;
+        // on later connects reject any key that doesn't match the pinned one.
+        let knownKey = host.knownHostKey
+        let recorder = HostKeyRecorder()
         let client: SSHClient
         do {
             client = try await SSHClient.connect(
                 host: host.hostname,
                 port: host.port,
                 authenticationMethod: auth,
-                hostKeyValidator: .acceptAnything(),
+                hostKeyValidator: .custom(TOFUHostKeyValidator(expected: knownKey, recorder: recorder)),
                 reconnect: .never
             )
         } catch {
+            // A recorded key that differs from the pinned one means the validator
+            // rejected it — surface that distinctly from a generic failure.
+            if let seen = recorder.seenKey, let knownKey, seen != knownKey {
+                throw HerdrError.connectionFailed(
+                    "The SSH host key for \(host.displayName) has changed since you last connected. "
+                    + "This can happen if the server was reinstalled — but it can also mean the "
+                    + "connection is being intercepted. If you trust the change, remove and re-add this host."
+                )
+            }
             throw HerdrError.connectionFailed("Couldn't connect to \(host.displayName): \(error)")
         }
+        // First successful connect: pin the key we just trusted.
+        if knownKey == nil, let seen = recorder.seenKey { pinHostKey(seen) }
 
         // Resolve the socket path before publishing any state, so a discovery
         // failure can't leave the actor half-connected (client set, socketPath
@@ -177,6 +197,32 @@ public actor SSHTransport: HerdrTransport {
         var buffer = LineBuffer()
         var response: RPCResponse?
         var failure: Error?
+    }
+
+    /// Captures the host key the server presented, so `connect` can pin it after
+    /// a first connect or distinguish a mismatch from a generic failure. Written
+    /// on the handshake's event loop and read only after `connect` returns, so
+    /// the access never races.
+    private final class HostKeyRecorder: @unchecked Sendable {
+        var seenKey: String?
+    }
+
+    /// Trust-on-first-use host-key validator. Records the presented key, then
+    /// accepts it if nothing is pinned yet (`expected == nil`) or it matches the
+    /// pinned key; otherwise rejects, so a changed key aborts the handshake.
+    private struct TOFUHostKeyValidator: NIOSSHClientServerAuthenticationDelegate {
+        let expected: String?
+        let recorder: HostKeyRecorder
+
+        func validateHostKey(hostKey: NIOSSHPublicKey, validationCompletePromise: EventLoopPromise<Void>) {
+            let seen = String(openSSHPublicKey: hostKey)
+            recorder.seenKey = seen
+            if expected == nil || expected == seen {
+                validationCompletePromise.succeed(())
+            } else {
+                validationCompletePromise.fail(HerdrError.connectionFailed("SSH host key mismatch."))
+            }
+        }
     }
 
     private static func data(_ buffer: ByteBuffer) -> Data {

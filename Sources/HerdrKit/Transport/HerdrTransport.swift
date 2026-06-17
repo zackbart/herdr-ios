@@ -33,7 +33,4 @@ public enum HerdrError: Error, Sendable {
     /// host, or a socket bridge that couldn't start. Carries a message safe to
     /// show the user.
     case connectionFailed(String)
-    /// Legacy friendly-message case retained for transports that are still
-    /// stubbed out; prefer `connectionFailed` for real failures.
-    case sshNotWired(String)
 }

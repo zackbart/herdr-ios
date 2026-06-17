@@ -23,10 +23,18 @@ packages:
     url: https://github.com/orlandos-nl/Citadel.git
     from: "0.7.0"
   # Citadel's transitive deps that SSHTransport imports directly: NIOCore for
-  # `ByteBuffer`, swift-crypto for the `Insecure` namespace Citadel extends.
+  # `ByteBuffer`, NIOSSH for host-key pinning (the `NIOSSHPublicKey` /
+  # `NIOSSHClientServerAuthenticationDelegate` TOFU validator), swift-crypto for
+  # the `Insecure` namespace Citadel extends.
   swift-nio:
     url: https://github.com/apple/swift-nio.git
     from: "2.0.0"
+  # Same fork + range Citadel pins (it has no NIOSSH re-export, so we depend on
+  # the identical package to avoid a duplicate `NIOSSH` product). Used by the
+  # TOFU host-key validator in SSHTransport.
+  swift-nio-ssh:
+    url: https://github.com/Wellz26/swift-nio-ssh.git
+    from: "0.3.4"
   swift-crypto:
     url: https://github.com/apple/swift-crypto.git
     from: "3.0.0"
@@ -44,6 +52,8 @@ targets:
         product: Citadel
       - package: swift-nio
         product: NIOCore
+      - package: swift-nio-ssh
+        product: NIOSSH
       - package: swift-crypto
         product: Crypto
     settings:

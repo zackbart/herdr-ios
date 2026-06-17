@@ -46,14 +46,24 @@ struct PaneView: View {
         .sheet(isPresented: $showingRaw) { RawTerminalSheet(paneID: paneID) }
         // Poll while the pane is open — the socket API pushes no pane-output
         // events, so a gentle re-read is the only way to keep the transcript and
-        // status footer live. `.task` cancels on disappear / id change.
-        .task(id: paneID) {
+        // status footer live. Re-keyed on `showingRaw` so opening the Raw sheet
+        // (which runs its own poll) pauses this one instead of double-reading the
+        // remote pane every tick. `.task` cancels on disappear / id change.
+        .task(id: pollKey) {
+            guard !showingRaw else { return }
             while !Task.isCancelled {
                 await session.refreshPaneDisplay(for: paneID, isAgent: pane?.isAgent == true)
-                try? await Task.sleep(for: .seconds(2))
+                try? await Task.sleep(for: pollInterval)
             }
         }
     }
+
+    /// Restart the poll when the pane changes or the Raw sheet opens/closes.
+    private var pollKey: String { "\(paneID.rawValue)|\(showingRaw)" }
+
+    /// Poll fast while an agent is actively working; ease off otherwise so an
+    /// open-but-quiet pane isn't spawning a remote read every 2s on cellular.
+    private var pollInterval: Duration { pane?.status == .working ? .seconds(2) : .seconds(5) }
 
     /// Pinned, auto-refreshing projection of the agent's status footer (task,
     /// subagents, context, mode), cleaned of grid framing and color-preserved.
@@ -267,15 +277,6 @@ private struct RawTerminalSheet: View {
 }
 
 extension String {
-    /// Remove ANSI/VT escape sequences so terminal output renders as plain text.
-    func strippingANSI() -> String {
-        guard contains("\u{1B}") else { return self }
-        let pattern = "\u{1B}\\[[0-9;?]*[ -/]*[@-~]"
-        guard let regex = try? NSRegularExpression(pattern: pattern) else { return self }
-        let range = NSRange(startIndex..<endIndex, in: self)
-        return regex.stringByReplacingMatches(in: self, range: range, withTemplate: "")
-    }
-
     /// Parse ANSI SGR color sequences (16-color, 256-color, and 24-bit truecolor
     /// foreground) into an `AttributedString`, dropping every other escape
     /// (cursor moves, erase, etc.). This restores the color structure an agent's
@@ -289,7 +290,7 @@ extension String {
         }
         let pattern = "\u{1B}\\[([0-9;]*)([ -/]*[@-~])"
         guard let regex = try? NSRegularExpression(pattern: pattern) else {
-            var plain = AttributedString(strippingANSI())
+            var plain = AttributedString(TerminalText.stripANSI(self))
             plain.foregroundColor = defaultColor
             return plain
         }

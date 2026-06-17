@@ -29,6 +29,10 @@ struct Host: Identifiable, Codable, Hashable, Sendable {
     /// running session under `~/.config/herdr/sessions/<n>/`. Set this only to
     /// target a specific named session or a non-standard path.
     var socketPath: String = ""
+    /// The SSH host key trusted on first connect (TOFU), as an OpenSSH
+    /// `"algo base64"` string. Non-secret. `nil` until the first successful
+    /// connection pins it; later connects reject a key that doesn't match.
+    var knownHostKey: String?
 
     var displayName: String {
         nickname.isEmpty ? "\(username)@\(hostname)" : nickname

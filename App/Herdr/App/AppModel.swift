@@ -32,8 +32,11 @@ final class AppModel {
     /// Connect to a saved host over SSH, bridging to its Herdr Unix socket.
     func connect(to host: Host) async {
         let credential = connections.credential(for: host)
+        let connections = connections
         await connect(label: host.displayName) {
-            HerdrClient(transport: SSHTransport(host: host, credential: credential))
+            HerdrClient(transport: SSHTransport(host: host, credential: credential) { key in
+                Task { @MainActor in connections.pinHostKey(key, for: host) }
+            })
         }
     }
 
@@ -60,7 +63,6 @@ final class AppModel {
     private func friendlyMessage(for error: Error) -> String {
         switch error {
         case HerdrError.connectionFailed(let message): return message
-        case HerdrError.sshNotWired(let message): return message
         default: return String(describing: error)
         }
     }

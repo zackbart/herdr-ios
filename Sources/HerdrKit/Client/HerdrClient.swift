@@ -85,13 +85,13 @@ public actor HerdrClient {
     /// server's terminal-width soft-wrapping isn't baked in — the right source to
     /// re-wrap for a narrow screen). `TerminalText.clean` makes it mobile-ready.
     public func readPane(_ pane: PaneID, lines: Int = 200) async throws -> [String] {
-        try await readLines(pane, source: PaneReadSource.recentUnwrapped)
+        try await readLines(pane, source: PaneReadSource.recentUnwrapped, lines: lines)
     }
 
     /// Read the exact terminal grid (`recent`, hard-wrapped to the server width).
     /// Backs the "Raw" inspector; the default transcript view uses `readPane`.
-    public func readRawTerminal(_ pane: PaneID) async throws -> [String] {
-        try await readLines(pane, source: PaneReadSource.recent)
+    public func readRawTerminal(_ pane: PaneID, lines: Int = 500) async throws -> [String] {
+        try await readLines(pane, source: PaneReadSource.recent, lines: lines)
     }
 
     /// Read the agent "status" region: the bottom-buffer snapshot the server uses
@@ -100,14 +100,17 @@ public actor HerdrClient {
     /// structured fields; the UI colorizes it. The only way to keep it live is to
     /// poll, since the socket API pushes no pane-output events.
     public func readAgentStatus(_ pane: PaneID) async throws -> [String] {
-        try await readLines(pane, source: PaneReadSource.detection)
+        // `detection` is a fixed bottom-buffer snapshot — no `lines` bound applies.
+        try await readLines(pane, source: PaneReadSource.detection, lines: nil)
     }
 
-    private func readLines(_ pane: PaneID, source: String) async throws -> [String] {
-        let result = try await call(Method.paneRead, .object([
+    private func readLines(_ pane: PaneID, source: String, lines: Int?) async throws -> [String] {
+        var params: [String: JSONValue] = [
             "pane_id": .string(pane.rawValue),
             "source": .string(source),
-        ]))
+        ]
+        if let lines { params["lines"] = .int(lines) }
+        let result = try await call(Method.paneRead, .object(params))
         guard let text = try result.decodedSnake(PaneReadResult.self).read.text else { return [] }
         var split = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
         if split.last == "" { split.removeLast() } // drop the artifact of a trailing newline

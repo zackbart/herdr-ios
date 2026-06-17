@@ -34,6 +34,16 @@ final class ConnectionStore {
         keychain.delete(account: host.id.uuidString)
     }
 
+    /// Record the SSH host key trusted on first connect (TOFU). Persists so later
+    /// connections can detect a changed key. No-op if the host is gone or already
+    /// pinned to this key.
+    func pinHostKey(_ key: String, for host: Host) {
+        guard let index = hosts.firstIndex(where: { $0.id == host.id }),
+              hosts[index].knownHostKey != key else { return }
+        hosts[index].knownHostKey = key
+        persist()
+    }
+
     func credential(for host: Host) -> Credential {
         let secret = keychain.get(account: host.id.uuidString)
         switch host.authMethod {
