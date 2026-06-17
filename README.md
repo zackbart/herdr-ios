@@ -1,8 +1,15 @@
-# Herdr iOS
+<p align="center">
+  <img src="App/Herdr/Assets.xcassets/AppIcon.appiconset/AppIcon-1024.png" width="128" alt="Herdr iOS app icon">
+</p>
+
+<h1 align="center">Herdr iOS</h1>
 
 A native iOS (SwiftUI) client for [Herdr](https://herdr.dev), the terminal-native
 **agent multiplexer**. Browse your workspaces, watch live agent status, and read
 or drive any pane from your phone.
+
+> **Unofficial client.** Herdr and its branding are the work of its author (see
+> [Credits](#credits)); this project is an independent iOS front-end for it.
 
 > **Status:** the full app runs on an in-memory **Mock** transport with realistic
 > data and live status updates, *and* over a real **SSH** connection that bridges
@@ -121,6 +128,15 @@ already builds an `SSHTransport`); the demo entry point stays on the Mock.
 - Confirm the exact socket `method` strings and subscribe/event names in
   `Sources/HerdrKit/Protocol/Method.swift` against
   <https://herdr.dev/docs/socket-api/>.
+
+## Credits
+
+All credit for **Herdr** itself — the terminal-native agent multiplexer this app
+is a client for — goes to its creator,
+[@ogulcancelik](https://github.com/ogulcancelik) ([herdr.dev](https://herdr.dev)).
+Herdr's design, socket API, name, and branding (the ram mark and prompt logo this
+app's icon echoes) are theirs. This repository is an independent, unofficial iOS
+client and is not affiliated with or endorsed by the Herdr project.
 
 ## References
 
