@@ -89,7 +89,7 @@ public actor HerdrClient {
     }
 
     /// Read the exact terminal grid (`recent`, hard-wrapped to the server width).
-    /// Backs the "Raw" inspector; the default transcript view uses `readPane`.
+    /// Backs the Fit/Scroll grid modes; the Reader mode uses `readPane`.
     public func readRawTerminal(_ pane: PaneID, lines: Int = 500) async throws -> [String] {
         try await readLines(pane, source: PaneReadSource.recent, lines: lines)
     }

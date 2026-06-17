@@ -2,25 +2,53 @@ import Foundation
 import SwiftUI
 import HerdrKit
 
-/// Screen 3: read a pane's output and send input, rendered as a light terminal —
-/// a near-white scrollback surface and a prompt-style input bar. An iSH-style
-/// key bar (sticky Ctrl, Esc, arrows) rides above the keyboard. Scrollback comes
-/// from `pane.read`; keys go via `pane.send_keys`.
+/// How a pane's terminal output is laid out on a phone screen. A terminal is a
+/// fixed-width grid; reflowing it to phone width scrambles box-drawn / columnar
+/// TUI layouts, so the grid modes (`fit`, `scroll`) render the raw grid faithfully
+/// and only `reader` reflows (for long plain prose).
+enum PaneRenderMode: String, CaseIterable {
+    /// Faithful grid, font auto-shrunk so the whole width fits — no scrolling.
+    case fit
+    /// Faithful grid at a fixed readable font; pan left/right to see the rest.
+    case scroll
+    /// Cleaned, unwrapped output reflowed to phone width — layout not preserved.
+    case reader
+
+    var label: String {
+        switch self {
+        case .fit: return "Fit"
+        case .scroll: return "Scroll"
+        case .reader: return "Reader"
+        }
+    }
+}
+
+/// Screen 3: read a pane's output and send input, rendered as a light terminal.
+/// Output renders in one of three `PaneRenderMode`s (toggle under the header); an
+/// iSH-style key bar (sticky Ctrl, Esc, arrows) rides above the keyboard. Grid
+/// modes read `pane.read recent` (raw grid); reader reads `recent_unwrapped`.
 struct PaneView: View {
     @Environment(SessionModel.self) private var session
     let paneID: PaneID
 
     @State private var input: String = ""
     @State private var ctrlActive = false
-    @State private var showingRaw = false
+    @AppStorage("paneRenderMode") private var mode: PaneRenderMode = .fit
+    /// Raw terminal grid lines for the `fit`/`scroll` modes (uncleaned `recent`).
+    @State private var gridLines: [String] = []
     @FocusState private var inputFocused: Bool
 
     private var pane: Pane? { session.pane(paneID) }
     private var lines: [String] { session.outputs[paneID] ?? [] }
+    /// Monospace advance ≈ 0.6em for the system monospaced font.
+    // ponytail: fixed ratio, not measured — fine for SF Mono; revisit if a
+    // proportional or CJK-heavy font ever sneaks in.
+    private let monoAdvance = 0.6
 
     var body: some View {
         VStack(spacing: 0) {
-            scrollback
+            modeToggle
+            content
             Rectangle()
                 .fill(Theme.terminalDim.opacity(0.18))
                 .frame(height: 1)
@@ -37,29 +65,52 @@ struct PaneView: View {
                 if let pane, pane.isAgent {
                     StatusTag(status: pane.status)
                 }
-                Button { showingRaw = true } label: { Image(systemName: "terminal") }
-                    .tint(Theme.ink)
-                    .accessibilityLabel("Raw terminal")
             }
         }
-        .sheet(isPresented: $showingRaw) { RawTerminalSheet(paneID: paneID) }
         // Keep the pane live by re-reading whenever it emits new output. The
         // socket API pushes no pane-output events, but `pane.wait_for_output`
         // lets us block until the screen changes (or the wait times out) instead
         // of polling on a fixed timer — instant on activity, quiet while idle.
-        // Re-keyed on `showingRaw` so opening the Raw sheet (which runs its own
-        // reader) pauses this loop. `.task` cancels on disappear / id change.
+        // Re-keyed on `mode` so flipping modes re-reads the right source. `.task`
+        // cancels on disappear / id change.
         .task(id: pollKey) {
-            guard !showingRaw else { return }
             while !Task.isCancelled {
-                await session.refreshPaneDisplay(for: paneID, isAgent: pane?.isAgent == true)
-                await session.awaitOutput(for: paneID)
+                if mode == .reader {
+                    await session.refreshPaneDisplay(for: paneID, isAgent: pane?.isAgent == true)
+                    await session.awaitOutput(for: paneID, source: PaneReadSource.recentUnwrapped)
+                } else {
+                    let fresh = await session.rawTerminal(for: paneID)
+                    if Task.isCancelled { return } // don't clobber a newer pane/mode's grid
+                    gridLines = fresh
+                    // Wait on `recent` so a raw-grid change (e.g. an in-place TUI
+                    // redraw) wakes us even when the unwrapped scrollback is unchanged.
+                    await session.awaitOutput(for: paneID, source: PaneReadSource.recent)
+                }
             }
         }
     }
 
-    /// Restart the loop when the pane changes or the Raw sheet opens/closes.
-    private var pollKey: String { "\(paneID.rawValue)|\(showingRaw)" }
+    /// Restart the read loop when the pane or render mode changes — each mode
+    /// reads a different `pane.read` source.
+    private var pollKey: String { "\(paneID.rawValue)|\(mode.rawValue)" }
+
+    private var modeToggle: some View {
+        Picker("Layout", selection: $mode) {
+            ForEach(PaneRenderMode.allCases, id: \.self) { Text($0.label).tag($0) }
+        }
+        .pickerStyle(.segmented)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
+        .background(Theme.terminalSurface)
+    }
+
+    @ViewBuilder private var content: some View {
+        switch mode {
+        case .fit: fitGrid
+        case .scroll: scrollGrid
+        case .reader: scrollback
+        }
+    }
 
     private var scrollback: some View {
         ScrollViewReader { proxy in
@@ -88,6 +139,70 @@ struct PaneView: View {
                 withAnimation { proxy.scrollTo(bottomAnchor, anchor: .bottom) }
             }
             .onAppear { proxy.scrollTo(bottomAnchor, anchor: .bottom) }
+        }
+    }
+
+    /// Fit mode: the raw grid with the font auto-shrunk so the widest line fits
+    /// the screen — vertical scroll only, no horizontal pan. Faithful layout,
+    /// small font at high column counts (≈7–8pt at 80 cols on a phone).
+    private var fitGrid: some View {
+        GeometryReader { geo in
+            // Size the font from the widest line so cols * advance * size fits.
+            // 0.97 leaves a hair of slack against advance-ratio error.
+            // ponytail: Character count, not terminal display width — CJK/emoji
+            // (width 2) would under-count and overflow slightly. Agent TUIs are
+            // overwhelmingly width-1 box/ASCII; add a wcwidth pass if that breaks.
+            let cols = max(1, gridLines.map { TerminalText.stripANSI($0).count }.max() ?? 1)
+            let size = max(5, min(15, (geo.size.width - 28) * 0.97 / (Double(cols) * monoAdvance)))
+            ScrollViewReader { proxy in
+                ScrollView(.vertical) {
+                    LazyVStack(alignment: .leading, spacing: 0) {
+                        gridPlaceholder
+                        ForEach(Array(gridLines.enumerated()), id: \.offset) { _, line in
+                            // One uniform size for every row keeps columns aligned —
+                            // no per-row minimumScaleFactor (it would scale wide rows
+                            // independently and break the grid). A pathologically wide
+                            // line truncates rather than shrinking out of alignment.
+                            Text(line.ansiAttributed(defaultColor: Theme.terminalText))
+                                .font(.system(size: size, design: .monospaced))
+                                .lineLimit(1)
+                        }
+                        Color.clear.frame(height: 1).id(bottomAnchor)
+                    }
+                    .padding(14)
+                }
+                .onChange(of: gridLines.count) {
+                    withAnimation { proxy.scrollTo(bottomAnchor, anchor: .bottom) }
+                }
+            }
+        }
+        .background(Theme.terminalBG)
+    }
+
+    /// Scroll mode: the raw grid at a fixed readable font, panned in both axes —
+    /// the faithful terminal view (what the agent's screen literally looks like).
+    private var scrollGrid: some View {
+        ScrollView([.vertical, .horizontal]) {
+            LazyVStack(alignment: .leading, spacing: 1) {
+                gridPlaceholder
+                ForEach(Array(gridLines.enumerated()), id: \.offset) { _, line in
+                    Text(line.ansiAttributed(defaultColor: Theme.terminalText))
+                        .font(Theme.monospaced)
+                        .textSelection(.enabled)
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
+                }
+            }
+            .padding(14)
+        }
+        .background(Theme.terminalBG)
+    }
+
+    @ViewBuilder private var gridPlaceholder: some View {
+        if gridLines.isEmpty {
+            Text("— no output yet —")
+                .font(Theme.monospaced)
+                .foregroundStyle(Theme.terminalDim)
         }
     }
 
@@ -200,47 +315,6 @@ struct PaneView: View {
         let text = input
         input = ""
         Task { await session.submit(text, to: paneID) }
-    }
-}
-
-/// The "Raw" escape hatch: the exact terminal grid (hard-wrapped to the server
-/// width), shown monospaced with 2-axis scrolling for when you need to inspect
-/// what the agent's screen literally looks like. Polls like the main view.
-private struct RawTerminalSheet: View {
-    @Environment(\.dismiss) private var dismiss
-    @Environment(SessionModel.self) private var session
-    let paneID: PaneID
-    @State private var raw: [String] = []
-
-    var body: some View {
-        NavigationStack {
-            ScrollView([.vertical, .horizontal]) {
-                LazyVStack(alignment: .leading, spacing: 1) {
-                    ForEach(Array(raw.enumerated()), id: \.offset) { _, line in
-                        Text(line.ansiAttributed(defaultColor: Theme.terminalText))
-                            .font(Theme.monospaced)
-                            .textSelection(.enabled)
-                            .lineLimit(1)
-                            .fixedSize(horizontal: true, vertical: false)
-                    }
-                }
-                .padding(14)
-            }
-            .background(Theme.terminalBG)
-            .navigationTitle("Raw terminal")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Done") { dismiss() }
-                }
-            }
-        }
-        .task(id: paneID) {
-            while !Task.isCancelled {
-                raw = await session.rawTerminal(for: paneID)
-                try? await Task.sleep(for: .seconds(2))
-            }
-        }
     }
 }
 
